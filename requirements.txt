@@ -1,0 +1,11 @@
+# Core dependencies
+Pillow>=9.0.0
+numpy>=1.21.0
+
+# Deep Learning (optional, required for --nn flag)
+# tensorflow>=2.10.0  # Uncomment for GPU support
+# tensorflow-macos>=2.10.0  # For macOS
+tensorflow-cpu>=2.10.0  # CPU-only version (smaller download)
+
+# Visualization (optional, for training history plots)
+matplotlib>=3.5.0

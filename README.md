@@ -44,24 +44,72 @@ The implementation follows the 5-phase pipeline from the paper:
 ## Installation
 
 ```bash
+pip install -r requirements.txt
+```
+
+### Minimal installation (vectorization only)
+
+```bash
 pip install pillow numpy
 ```
 
+### Full installation (with Deep Learning upscaling)
+
+```bash
+pip install pillow numpy tensorflow-cpu matplotlib
+```
+
 ## Usage
+
+### Basic Usage (Vectorization - Kopf-Lischinski 2011)
 
 ```bash
 python main.py path/to/your/image.png
 ```
 
-### Example
+### Deep Neural Network Upscaling
 
 ```bash
-python main.py input/megaman.png
+python main.py path/to/your/image.png --nn --upscale 16 --epochs 1000
 ```
+
+### Run Both Pipelines
+
+```bash
+python main.py path/to/your/image.png --both
+```
+
+### Examples
+
+```bash
+# Vectorization only (default)
+python main.py input/megaman.png
+
+# Deep NN upscaling with 16x factor
+python main.py input/megaman.png --nn -u 16 -e 1000
+
+# Run both pipelines
+python main.py input/megaman.png --both --upscale 16
+
+# Save trained model
+python main.py input/megaman.png --nn --save-model
+```
+
+### Command Line Options
+
+| Option | Description |
+|--------|-------------|
+| `--nn`, `--neural-network` | Use Deep Neural Network instead of vectorization |
+| `--both` | Run both vectorization AND Deep NN pipelines |
+| `--upscale`, `-u` | Upscale factor for Deep NN (default: 16) |
+| `--epochs`, `-e` | Training epochs for Deep NN (default: 1000) |
+| `--save-model` | Save the trained Deep NN model (.h5 file) |
 
 Output files are saved in `output/<image_name>_<timestamp>/` directory.
 
 ## Output Files
+
+### Kopf-Lischinski Vectorization Pipeline
 
 | File | Description |
 |------|-------------|
@@ -70,40 +118,65 @@ Output files are saved in `output/<image_name>_<timestamp>/` directory.
 | `contornos_splines.svg` | Phase 5: Final optimized B-spline curves |
 | `contornos_splines_debug.svg` | Debug view with control points and corners |
 
+### Deep Neural Network Pipeline
+
+| File | Description |
+|------|-------------|
+| `upscaled_Nx.png` | Upscaled image (N = upscale factor) |
+| `reconstruction.png` | Reconstruction at original resolution |
+| `comparison.png` | Side-by-side: original vs upscaled |
+| `training_history.png` | Loss and accuracy curves |
+| `model.h5` | Saved trained model (if --save-model) |
+
 ## Project Structure
 
 ```
 vibe-depixel/
 ├── main.py                 # Entry point and pipeline orchestration
+├── requirements.txt        # Python dependencies
 ├── core/
 │   ├── color.py           # YUV conversion and color similarity
 │   ├── graph.py           # Similarity graph and planarization (Phases 1-4)
 │   ├── spline.py          # Cubic B-splines and optimization (Phase 5)
+│   ├── deep_nn.py         # Deep Neural Network upscaling (alternative)
 │   └── render.py          # SVG export
 ├── input/                 # Input images
-└── output/                # Generated SVG files
+└── output/                # Generated SVG/PNG files
 ```
 
 ## Key Classes
 
-### `SimilarityGraph` (core/graph.py)
+### Kopf-Lischinski Pipeline
+
+#### `SimilarityGraph` (core/graph.py)
 - `_build_initial_graph()`: Creates 8-connected pixel graph
 - `planarize()`: Resolves diagonal crossings (Phase 2)
 - `reshape_cells()`: Vertex splitting for adaptive cells (Phase 3)
 - `extract_visible_contours()`: Extracts boundaries (Phase 4)
 
-### `CubicBSpline` (core/spline.py)
+#### `CubicBSpline` (core/spline.py)
 - `evaluate(t)`: Evaluates cubic B-spline at parameter t
 - `_detect_corners()`: Identifies sharp corners to preserve
 - `optimize()`: Energy minimization with corner preservation
 - `to_svg_path()`: Converts to SVG path string
 
-### `SplineOptimizer` (core/spline.py)
+#### `SplineOptimizer` (core/spline.py)
 - `_chain_segments()`: Connects segments into continuous paths
 - `_simplify_path()`: Ramer-Douglas-Peucker simplification
 - `get_splines()`: Creates optimized B-splines from contours
 
+### Deep Neural Network Pipeline
+
+#### `DeepNNDepixelizer` (core/deep_nn.py)
+- `fit()`: Trains the network on input image coordinates → colors
+- `predict()`: Generates upscaled image at target resolution
+- `predict_train()`: Reconstructs original image
+- `save_model()` / `load_model()`: Model persistence
+- `plot_training_history()`: Visualizes training progress
+
 ## Algorithm Parameters
+
+### Kopf-Lischinski Vectorization
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -114,18 +187,43 @@ vibe-depixel/
 | `simplify_tolerance` | 0.1 | RDP simplification tolerance |
 | `optimize_iterations` | 3 | Energy optimization iterations |
 
+### Deep Neural Network Upscaling
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `upscale_factor` | 16 | Output image magnification |
+| `epochs` | 1000 | Training iterations |
+| `batch_size` | 32 | Mini-batch size |
+| `learning_rate` | 0.001 | Adam optimizer learning rate |
+| `dropout_rate` | 0.125 | Dropout regularization rate |
+| `validation_split` | 0.1 | Fraction for validation |
+| `patience` | 50 | Early stopping patience |
+
 ## Example Results
+
+### Kopf-Lischinski Vectorization
 
 The algorithm successfully converts pixel art into smooth vector graphics while:
 - Preserving sharp corners and features
 - Removing pixel aliasing artifacts
 - Creating resolution-independent output
 
+### Deep Neural Network Upscaling
+
+The Deep NN approach:
+- Learns the discrete color palette from input
+- Maps 2D coordinates to colors via one-hot encoding
+- Generates upscaled images without blur or interpolation artifacts
+- Can upscale to arbitrary resolutions
+
 ## References
 
 - Kopf, J., & Lischinski, D. (2011). **Depixelizing Pixel Art**. ACM SIGGRAPH 2011 Papers.
   - [Project Page](https://johanneskopf.de/publications/pixelart/)
   - [Paper PDF](https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Kopf11.pdf)
+
+- Inacio, D. **Depixelizing Pixel Art using Deep Neural Networks**.
+  - [GitHub Notebook](https://github.com/diegoinacio/creative-coding-notebooks/blob/master/ML-and-AI/pixel-art-depixelization-deepNN.ipynb)
 
 ## License
 
