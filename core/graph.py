@@ -54,29 +54,99 @@ class SimilarityGraph:
             print(f"Resolvidos {crossings_count} cruzamentos diagonais.")
 
     def _resolve_2x2_block(self, y, x, d1, d2):
+        """
+        Resolves diagonal crossing in a 2x2 block according to Kopf-Lischinski 2011.
+        
+        d1: diagonal ((y, x), (y+1, x+1)) - top-left to bottom-right
+        d2: diagonal ((y, x+1), (y+1, x)) - top-right to bottom-left
+        """
+        # Get all 4 pixels in the 2x2 block
+        p_tl = (y, x)       # top-left
+        p_tr = (y, x+1)     # top-right
+        p_bl = (y+1, x)     # bottom-left
+        p_br = (y+1, x+1)   # bottom-right
+        
+        # Check if 2x2 block is FULLY CONNECTED (all pixels connected to each other)
+        # In a fully connected 2x2, all 6 possible edges exist (4 orthogonals + 2 diagonals)
+        if self._is_fully_connected_2x2(p_tl, p_tr, p_bl, p_br):
+            # Paper: "If a 2×2 block is fully connected, it is part of a continuously 
+            # shaded region. In this case the two diagonal connections can be safely 
+            # removed without further analysis."
+            self._remove_edge(d1[0], d1[1])
+            self._remove_edge(d2[0], d2[1])
+            return
+        
+        # Not fully connected - apply heuristics to decide which diagonal to remove
         w1, w2 = 0, 0
         
         # 1. Island Heuristic
-        if len(self.edges[d1[0]]) <= 1 or len(self.edges[d1[1]]) <= 1: w2 += 10
-        if len(self.edges[d2[0]]) <= 1 or len(self.edges[d2[1]]) <= 1: w1 += 10
-
-        # 2. Curve Heuristic
-        len1 = self.component_sizes.get(d1[0], 0)
-        len2 = self.component_sizes.get(d2[0], 0)
-        if len1 > len2: w1 += (len1 - len2)
-        elif len2 > len1: w2 += (len2 - len1)
-
-        # 3. Sparse Heuristic
-        s1 = self._get_sparse_count(y, x, d1[0])
-        s2 = self._get_sparse_count(y, x, d2[0])
-        if s1 < s2: w1 += (s2 - s1)
-        elif s2 < s1: w2 += (s1 - s2)
+        # If removing a diagonal would create an "island" (pixel with ≤1 connection),
+        # we should PRESERVE that diagonal (vote FOR it, higher weight = keep)
+        if len(self.edges.get(d1[0], [])) <= 1 or len(self.edges.get(d1[1], [])) <= 1:
+            w1 += 10  # Preserve d1 to avoid creating islands
+        if len(self.edges.get(d2[0], [])) <= 1 or len(self.edges.get(d2[1], [])) <= 1:
+            w2 += 10  # Preserve d2 to avoid creating islands
         
-        # Resolve
-        if w1 > w2:
-            self._remove_edge(d2[0], d2[1])
-        else:
+        # 2. Curve Heuristic (Sparse Heuristic in paper)
+        # Measures the size of the connected component along each diagonal.
+        # "This heuristic votes for connecting the pixels with the smaller connected component."
+        # The weight is the DIFFERENCE - we vote FOR the smaller component (preserve it)
+        size_d1 = self._get_diagonal_component_size(d1[0], d1[1])
+        size_d2 = self._get_diagonal_component_size(d2[0], d2[1])
+        
+        if size_d1 < size_d2:
+            w1 += (size_d2 - size_d1)  # Vote FOR d1 (smaller component)
+        elif size_d2 < size_d1:
+            w2 += (size_d1 - size_d2)  # Vote FOR d2 (smaller component)
+        
+        # 3. Island Heuristic (secondary check based on component structure)
+        # Already handled above with connection count
+        
+        # Resolve: Remove the diagonal with LOWER total weight
+        # (the one that received fewer "votes" to be preserved)
+        if w1 < w2:
             self._remove_edge(d1[0], d1[1])
+        else:
+            self._remove_edge(d2[0], d2[1])
+    
+    def _is_fully_connected_2x2(self, p_tl, p_tr, p_bl, p_br):
+        """
+        Checks if all 4 pixels in a 2x2 block are connected to each other.
+        A fully connected 2x2 has all 6 edges: 4 orthogonals + 2 diagonals.
+        """
+        edges = self.edges
+        
+        # Check orthogonal connections (4 edges)
+        if p_tr not in edges.get(p_tl, []): return False  # top edge
+        if p_bl not in edges.get(p_tl, []): return False  # left edge
+        if p_br not in edges.get(p_tr, []): return False  # right edge
+        if p_br not in edges.get(p_bl, []): return False  # bottom edge
+        
+        # Check diagonal connections (2 edges)
+        if p_br not in edges.get(p_tl, []): return False  # d1 diagonal
+        if p_bl not in edges.get(p_tr, []): return False  # d2 diagonal
+        
+        return True
+    
+    def _get_diagonal_component_size(self, p1, p2):
+        """
+        Measures the size of the connected component that includes both pixels p1 and p2.
+        This follows the paper's "sparse heuristic" which measures component size
+        connected to the diagonal.
+        """
+        # Start BFS/DFS from p1 and count reachable pixels (same-color component)
+        visited = set()
+        stack = [p1]
+        visited.add(p1)
+        
+        while stack:
+            curr = stack.pop()
+            for neighbor in self.edges.get(curr, []):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+        
+        return len(visited)
 
     def _precompute_component_sizes(self):
         visited = set()
@@ -99,17 +169,6 @@ class SimilarityGraph:
                     for node in comp_nodes:
                         component_map[node] = size
         return component_map
-
-    def _get_sparse_count(self, y_h, x_h, p):
-        count = 0
-        color = self.pixels_yuv[p[0], p[1]]
-        for dy in range(-4, 4):
-            for dx in range(-4, 4):
-                ny, nx = y_h + dy, x_h + dx
-                if 0 <= ny < self.height and 0 <= nx < self.width:
-                    if are_colors_similar(color, self.pixels_yuv[ny, nx]):
-                        count += 1
-        return count
 
     def _remove_edge(self, p1, p2):
         if p2 in self.edges[p1]: self.edges[p1].remove(p2)
