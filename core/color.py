@@ -17,6 +17,18 @@ def rgb_to_yuv(rgb):
     v = 0.615 * r - 0.51499 * g - 0.10001 * b
     return np.array([y, u, v])
 
+def yuv_to_rgb(yuv):
+    """
+    Converts YUV color back to RGB space.
+    Input yuv: numpy array (0-1)
+    Returns: numpy array (0-1)
+    """
+    y, u, v = yuv
+    r = y + 1.13983 * v
+    g = y - 0.39465 * u - 0.58060 * v
+    b = y + 2.03211 * u
+    return np.clip(np.array([r, g, b]), 0, 1)
+
 def are_colors_similar(yuv1, yuv2):
     """
     Checks if two YUV colors are similar based on the paper's thresholds.

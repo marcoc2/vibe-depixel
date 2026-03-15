@@ -18,6 +18,14 @@ def main():
     img = Image.open(image_path).convert('RGB')
     img_array = np.array(img)
 
+    # Create timestamped output directory
+    from datetime import datetime
+    image_name = os.path.splitext(os.path.basename(image_path))[0]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join("output", f"{image_name}_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"Resultados serão salvos em: {run_dir}")
+
     print("Construindo grafo de similaridade (Fase 1)...")
     graph = SimilarityGraph(img_array)
     
@@ -25,6 +33,9 @@ def main():
     
     print("Resolvendo ambiguidades (Fase 2: Planarização)...")
     graph.planarize()
+    
+    print("Remodelando células (Fase 3: Geometria)...")
+    graph.reshape_cells()
     
     print("Extraindo contornos (Fase 4)...")
     segments = graph.extract_visible_contours()
@@ -35,13 +46,23 @@ def main():
     
     print(f"Extraídas {len(optimizer.paths)} curvas contínuas.")
     
-    print("Exportando para SVG (Fase 5)...")
+    print("Exportando artefatos (Fase 5)...")
     from core.render import SVGExporter
     exporter = SVGExporter(splines, graph.width, graph.height)
-    output_path = "resultado.svg"
-    exporter.save(output_path)
     
-    print("Processo concluído com sucesso!")
+    # NEW: Save the similarity graph (connections)
+    graph_path = os.path.join(run_dir, "grafo_similaridade.svg")
+    exporter.export_similarity_graph(graph_path, graph.edges)
+    
+    # Save the contours/splines
+    spline_path = os.path.join(run_dir, "contornos_splines.svg")
+    exporter.save(spline_path)
+    
+    # Save the adaptive cells mesh
+    cells_path = os.path.join(run_dir, "celulas_voronoi.svg")
+    exporter.export_cells(cells_path, graph.cells, graph.pixels_yuv)
+    
+    print(f"Processo concluído com sucesso! Pasta de saída: {run_dir}")
 
 if __name__ == "__main__":
     main()
