@@ -39,25 +39,38 @@ def main():
     
     print("Extraindo contornos (Fase 4)...")
     segments = graph.extract_visible_contours()
-    
+
     from core.spline import SplineOptimizer
+    print("Otimizando splines (Fase 5: Spline Fitting & Optimization)...")
     optimizer = SplineOptimizer(segments)
-    splines = optimizer.get_splines()
+    # Use lower tolerance to keep more control points for corner detection
+    splines = optimizer.get_splines(simplify_tolerance=0.1, optimize_iterations=3)
+
+    print(f"Extraídas {len(splines)} curvas B-spline cúbicas otimizadas.")
     
-    print(f"Extraídas {len(optimizer.paths)} curvas contínuas.")
-    
+    # Count corners detected and show stats
+    total_corners = sum(len(s.corners) for s in splines)
+    total_control_points = sum(len(s.control_points) for s in splines)
+    avg_control_points = total_control_points / len(splines) if splines else 0
+    print(f"Total de cantos (corners) preservados: {total_corners}")
+    print(f"Pontos de controle totais: {total_control_points} (média: {avg_control_points:.2f} por curva)")
+
     print("Exportando artefatos (Fase 5)...")
     from core.render import SVGExporter
     exporter = SVGExporter(splines, graph.width, graph.height)
-    
+
     # NEW: Save the similarity graph (connections)
     graph_path = os.path.join(run_dir, "grafo_similaridade.svg")
     exporter.export_similarity_graph(graph_path, graph.edges)
-    
-    # Save the contours/splines
+
+    # Save the contours/splines (clean version)
     spline_path = os.path.join(run_dir, "contornos_splines.svg")
     exporter.save(spline_path)
     
+    # Save debug version with control points and corners
+    spline_debug_path = os.path.join(run_dir, "contornos_splines_debug.svg")
+    exporter.save(spline_debug_path, show_control_points=True, show_corners=True)
+
     # Save the adaptive cells mesh
     cells_path = os.path.join(run_dir, "celulas_voronoi.svg")
     exporter.export_cells(cells_path, graph.cells, graph.pixels_yuv)

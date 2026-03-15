@@ -4,22 +4,45 @@ class SVGExporter:
         self.width = width
         self.height = height
 
-    def save(self, file_path):
-        """Saves the splines as an SVG file."""
+    def save(self, file_path, show_control_points: bool = False, show_corners: bool = False):
+        """
+        Saves the splines as an SVG file.
+        
+        show_control_points: if True, draws control polygon and control points
+        show_corners: if True, highlights detected corner points in red
+        """
         with open(file_path, 'w') as f:
             f.write(f'<svg width="{self.width*10}" height="{self.height*10}" viewBox="0 0 {self.width} {self.height}" xmlns="http://www.w3.org/2000/svg">\n')
             
-            # Simple path rendering
+            # Define markers for corners and control points
+            f.write('''<defs>
+  <circle id="corner-marker" r="0.08" fill="red" stroke="darkred" stroke-width="0.02"/>
+  <circle id="control-marker" r="0.05" fill="blue" stroke="darkblue" stroke-width="0.01"/>
+</defs>\n''')
+
             for spline in self.splines:
-                points = spline.points
-                if len(points) < 2: continue
+                # Draw the optimized spline curve
+                path_str = spline.to_svg_path(num_samples=100)
+                if path_str:
+                    f.write(f'  <path d="{path_str}" stroke="black" stroke-width="0.05" fill="none" stroke-linecap="round" stroke-linejoin="round" />\n')
                 
-                path_str = f"M {points[0][1]} {points[0][0]} "
-                for p in points[1:]:
-                    path_str += f"L {p[1]} {p[0]} "
+                # Optionally draw control polygon
+                if show_control_points and len(spline.control_points) >= 2:
+                    ctrl_path = f"M {spline.control_points[0][1]:.3f} {spline.control_points[0][0]:.3f}"
+                    for cp in spline.control_points[1:]:
+                        ctrl_path += f" L {cp[1]:.3f} {cp[0]:.3f}"
+                    f.write(f'  <path d="{ctrl_path}" stroke="blue" stroke-width="0.02" fill="none" opacity="0.5" stroke-dasharray="0.1,0.05" />\n')
+                    
+                    # Draw control points
+                    for cp in spline.control_points:
+                        f.write(f'  <use x="{cp[1]:.3f}" y="{cp[0]:.3f}" href="#control-marker" opacity="0.7" />\n')
                 
-                f.write(f'  <path d="{path_str}" stroke="black" stroke-width="0.05" fill="none" />\n')
-            
+                # Optionally highlight corners
+                if show_corners:
+                    for i, cp in enumerate(spline.control_points):
+                        if spline.is_corner(i):
+                            f.write(f'  <use x="{cp[1]:.3f}" y="{cp[0]:.3f}" href="#corner-marker" />\n')
+
             f.write('</svg>')
         print(f"Resultado exportado para: {file_path}")
 
