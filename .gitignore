@@ -2,9 +2,17 @@
 venv/
 __pycache__/
 *.pyc
+*.pth
+
+.claude/
 
 # Project Outputs
 output/
+input/
 
 # Resources
 resources/
+
+# Others
+checkpoints/
+dataset/

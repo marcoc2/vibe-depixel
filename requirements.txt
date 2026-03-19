@@ -9,3 +9,7 @@ tensorflow-cpu>=2.10.0  # CPU-only version (smaller download)
 
 # Visualization (optional, for training history plots)
 matplotlib>=3.5.0
+
+# Super-Resolution model (optional, required for --train / --sr flags)
+torch>=2.0.0
+torchvision>=0.15.0

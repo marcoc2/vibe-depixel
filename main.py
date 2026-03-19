@@ -165,6 +165,8 @@ Examples:
     
     parser.add_argument(
         "image_path",
+        nargs='?',
+        default=None,
         help="Path to the input pixel art image"
     )
     
@@ -200,20 +202,110 @@ Examples:
         action="store_true",
         help="Save the trained Deep NN model"
     )
-    
+
+    # Super-Resolution flags
+    parser.add_argument(
+        "--train",
+        action="store_true",
+        help="Train the SR model on paired LR/HR dataset"
+    )
+    parser.add_argument(
+        "--lr-dir",
+        help="Directory with low-resolution training images"
+    )
+    parser.add_argument(
+        "--hr-dir",
+        help="Directory with high-resolution training images"
+    )
+    parser.add_argument(
+        "--val-lr-dir",
+        help="Directory with low-resolution validation images (optional, auto-split if omitted)"
+    )
+    parser.add_argument(
+        "--val-hr-dir",
+        help="Directory with high-resolution validation images (optional)"
+    )
+    parser.add_argument(
+        "--sr",
+        action="store_true",
+        help="Run SR model inference on the input image"
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default="checkpoints/sr_model_best.pth",
+        help="Path to SR model checkpoint (default: checkpoints/sr_model_best.pth)"
+    )
+    parser.add_argument(
+        "--patch-size",
+        type=int,
+        default=64,
+        help="LR patch size for training (default: 64)"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        help="Batch size for SR training (default: 16)"
+    )
+    parser.add_argument(
+        "--sr-epochs",
+        type=int,
+        default=200,
+        help="Number of epochs for SR training (default: 200)"
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=5e-4,
+        help="Learning rate for SR training (default: 5e-4)"
+    )
+    parser.add_argument(
+        "--no-perceptual",
+        action="store_true",
+        help="Disable VGG19 perceptual loss during SR training (on by default)"
+    )
+
     args = parser.parse_args()
     
+    # --- SR training mode (no image_path needed) ---
+    if args.train:
+        if not args.lr_dir or not args.hr_dir:
+            parser.error("--train requires --lr-dir and --hr-dir")
+        from core.sr_train import train as sr_train
+        sr_train(
+            lr_dir=args.lr_dir,
+            hr_dir=args.hr_dir,
+            val_lr_dir=args.val_lr_dir,
+            val_hr_dir=args.val_hr_dir,
+            patch_size=args.patch_size,
+            batch_size=args.batch_size,
+            epochs=args.sr_epochs,
+            lr=args.learning_rate,
+            use_perceptual=not args.no_perceptual,
+        )
+        return
+
+    # --- From here, image_path is required ---
+    if args.image_path is None:
+        parser.error("image_path is required for inference pipelines")
+
     # Validate input
     if not os.path.exists(args.image_path):
         print(f"Erro: Arquivo {args.image_path} não encontrado.")
         return
-    
+
+    # --- SR inference mode ---
+    if args.sr:
+        from core.sr_train import infer as sr_infer
+        sr_infer(args.image_path, args.checkpoint)
+        return
+
     # Load image
     print(f"Carregando imagem: {args.image_path}")
     img = Image.open(args.image_path).convert('RGB')
     img_array = np.array(img)
     print(f"Imagem carregada: {img_array.shape[1]}x{img_array.shape[0]} pixels")
-    
+
     # Create timestamped output directory
     from datetime import datetime
     image_name = os.path.splitext(os.path.basename(args.image_path))[0]
@@ -221,7 +313,7 @@ Examples:
     run_dir = os.path.join("output", f"{image_name}_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)
     print(f"Resultados serão salvos em: {run_dir}\n")
-    
+
     # Run selected pipeline(s)
     if args.use_nn and not args.both:
         # Deep NN only
