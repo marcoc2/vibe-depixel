@@ -260,9 +260,29 @@ Examples:
         help="Learning rate for SR training (default: 5e-4)"
     )
     parser.add_argument(
+        "--preset",
+        default="default",
+        help="Model preset: 'default', 'gemini', or 'esrgan'"
+    )
+    parser.add_argument(
+        "--pretrained",
+        default=None,
+        help="Path to pre-trained ESRGAN .pth file (required for --preset esrgan)"
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training from last saved state"
+    )
+    parser.add_argument(
         "--no-perceptual",
         action="store_true",
         help="Disable VGG19 perceptual loss during SR training (on by default)"
+    )
+    parser.add_argument(
+        "--lum-loss",
+        action="store_true",
+        help="Use YCbCr-weighted loss: Y=1.0, Cb/Cr=0.1 (robust to color drift)"
     )
 
     args = parser.parse_args()
@@ -282,6 +302,10 @@ Examples:
             epochs=args.sr_epochs,
             lr=args.learning_rate,
             use_perceptual=not args.no_perceptual,
+            use_lum_loss=args.lum_loss,
+            preset=args.preset,
+            resume=args.resume,
+            pretrained_path=args.pretrained,
         )
         return
 
@@ -297,7 +321,10 @@ Examples:
     # --- SR inference mode ---
     if args.sr:
         from core.sr_train import infer as sr_infer
-        sr_infer(args.image_path, args.checkpoint)
+        checkpoint = args.checkpoint
+        if checkpoint == "checkpoints/sr_model_best.pth":
+            checkpoint = f"checkpoints/{args.preset}/sr_model_best.pth"
+        sr_infer(args.image_path, checkpoint, preset=args.preset, pretrained_path=args.pretrained)
         return
 
     # Load image

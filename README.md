@@ -1,230 +1,199 @@
-# Depixelizing Pixel Art
+# vibe-depixel
 
-A Python implementation of the **Kopf-Lischinski 2011** algorithm for converting pixel art into resolution-independent vector graphics.
+Pixel art upscaling research project. Combines classical vectorization, coordinate-based neural networks, and learned super-resolution (SR) models trained on synthetic LR/HR pairs generated with Stable Diffusion.
 
-## Overview
+---
 
-This project implements the algorithm described in the paper ["Depixelizing Pixel Art"](https://johanneskopf.de/publications/pixelart/) by Johannes Kopf and Dani Lischinski (SIGGRAPH 2011). The algorithm converts low-resolution pixel art images into smooth, scalable vector graphics (SVG).
+## Pipelines
 
-## Algorithm Pipeline
-
-The implementation follows the 5-phase pipeline from the paper:
-
-### Phase 1: Similarity Graph Construction
-- Builds an 8-connected graph where pixels with similar colors are connected
-- Uses YUV color space with thresholds from the paper:
-  - Y (luminance): 48/255
-  - U: 7/255
-  - V: 6/255
-
-### Phase 2: Ambiguity Removal (Planarization)
-- Resolves diagonal crossings to make the graph planar
-- Handles fully-connected 2×2 blocks (removes both diagonals)
-- Applies three heuristics to decide which diagonal to remove:
-  - **Island Heuristic**: Preserves diagonals that prevent isolated pixels
-  - **Curve Heuristic**: Favors smaller connected components
-  - **Sparse Heuristic**: Considers local pixel density
-
-### Phase 3: Vertex Splitting (Cell Reshaping)
-- Splits corner vertices to create adaptive cells
-- Pixels connected diagonally get split vertices offset by 0.25 units
-- Creates smooth transitions between connected regions
-
-### Phase 4: Contour Extraction
-- Extracts visible boundaries between disconnected components
-- Uses cell geometry to determine boundary vertices
-- Chains segments into continuous paths
-
-### Phase 5: Spline Fitting & Optimization
-- Converts paths to **cubic B-spline curves**
-- Applies **Ramer-Douglas-Peucker** simplification
-- **Energy minimization** to smooth curves while preserving corners
-- Corner detection based on angle threshold (default: 100°)
-
-## Installation
+### 1. Kopf-Lischinski Vectorization
+Implements the depixelization pipeline from Kopf & Lischinski (2011): similarity graph → planarization → cell reshaping → contour extraction → cubic B-spline fitting.
 
 ```bash
-pip install -r requirements.txt
+python main.py input/sprite.png
 ```
 
-### Minimal installation (vectorization only)
+Outputs SVG files: similarity graph, spline contours, debug overlay, Voronoi cells.
+
+### 2. Deep NN (coordinate-based)
+Per-image neural network that learns the color palette and maps 2D coordinates to colors. Useful for single-image upscaling without a dataset.
 
 ```bash
-pip install pillow numpy
+python main.py input/sprite.png --nn --upscale 16 --epochs 1000
 ```
 
-### Full installation (with Deep Learning upscaling)
+### 3. Super-Resolution (learned, dataset-based)
+The main research pipeline. Trains convolutional and transformer models on paired LR/HR datasets to generalize across sprites.
 
 ```bash
-pip install pillow numpy tensorflow-cpu matplotlib
+# Train
+python main.py --train --lr-dir dataset/train/lr --hr-dir dataset/train/hr --preset gemini
+
+# Inference
+python main.py input/sprite.png --sr --checkpoint checkpoints/gemini/sr_model_best.pth --preset gemini
 ```
 
-## Usage
+---
 
-### Basic Usage (Vectorization - Kopf-Lischinski 2011)
+## SR Models
 
-```bash
-python main.py path/to/your/image.png
-```
+| Preset | Architecture | Params | Notes |
+|--------|-------------|--------|-------|
+| `default` | EDSRLite 64ch / 16 blocks | ~1.5M | Fast baseline |
+| `gemini` | EDSRLite 128ch / 32 blocks | ~11M | Main research model |
+| `esrgan` | RRDBNet via spandrel | ~16.7M | Fine-tuned from pretrained |
+| `swinir` | Swin Transformer via spandrel | varies | Fine-tuned from pretrained |
 
-### Deep Neural Network Upscaling
+Spandrel presets (`esrgan`, `swinir`) require a pretrained `.pth` file placed in the project root and passed via `--pretrained`.
 
-```bash
-python main.py path/to/your/image.png --nn --upscale 16 --epochs 1000
-```
+---
 
-### Run Both Pipelines
+## Loss Functions
 
-```bash
-python main.py path/to/your/image.png --both
-```
-
-### Examples
-
-```bash
-# Vectorization only (default)
-python main.py input/megaman.png
-
-# Deep NN upscaling with 16x factor
-python main.py input/megaman.png --nn -u 16 -e 1000
-
-# Run both pipelines
-python main.py input/megaman.png --both --upscale 16
-
-# Save trained model
-python main.py input/megaman.png --nn --save-model
-```
-
-### Command Line Options
-
-| Option | Description |
-|--------|-------------|
-| `--nn`, `--neural-network` | Use Deep Neural Network instead of vectorization |
-| `--both` | Run both vectorization AND Deep NN pipelines |
-| `--upscale`, `-u` | Upscale factor for Deep NN (default: 16) |
-| `--epochs`, `-e` | Training epochs for Deep NN (default: 1000) |
-| `--save-model` | Save the trained Deep NN model (.h5 file) |
-
-Output files are saved in `output/<image_name>_<timestamp>/` directory.
-
-## Output Files
-
-### Kopf-Lischinski Vectorization Pipeline
-
-| File | Description |
+| Name | Description |
 |------|-------------|
-| `grafo_similaridade.svg` | Phase 1: 8-connected similarity graph |
-| `celulas_voronoi.svg` | Phase 3: Adaptive cells with vertex splitting |
-| `contornos_splines.svg` | Phase 5: Final optimized B-spline curves |
-| `contornos_splines_debug.svg` | Debug view with control points and corners |
+| `SRLoss` | L1 + gradient + optional VGG19 perceptual. Standard RGB loss. |
+| `LumSRLoss` | YCbCr-weighted: Y channel gets full L1+gradient penalty, Cb/Cr get 10x less. Robust to color drift in synthetic datasets. |
 
-### Deep Neural Network Pipeline
+`LumSRLoss` perceptual options: `freq` (FFT magnitude on Y, no pretrained weights), `dists` (Deep Image Structure and Texture Similarity, requires `piq`), `vgg` (VGG19 on RGB), `none`.
 
-| File | Description |
-|------|-------------|
-| `upscaled_Nx.png` | Upscaled image (N = upscale factor) |
-| `reconstruction.png` | Reconstruction at original resolution |
-| `comparison.png` | Side-by-side: original vs upscaled |
-| `training_history.png` | Loss and accuracy curves |
-| `model.h5` | Saved trained model (if --save-model) |
+Enable with `--lum-loss` flag or `"lum_loss": True` in experiment config.
 
-## Project Structure
+---
+
+## Training Defaults per Preset
+
+Defined in `core/sr_model.py → TRAINING_DEFAULTS`. Applied automatically — override per experiment config if needed.
+
+| Preset | patch_size | grad_clip | weight_decay | optimizer |
+|--------|-----------|-----------|--------------|-----------|
+| default | 64 | 1.0 | 0.0 | Adam |
+| gemini | 64 | 1.0 | 0.0 | Adam |
+| esrgan | 64 | 0.1 | 0.01 | AdamW |
+| swinir | 128 | 0.1 | 0.01 | AdamW |
+
+Prodigy optimizer (adaptive LR) is also supported: set `"use_adamw": "prodigy"` in the experiment config. Requires `pip install prodigyopt`.
+
+LR schedule: CosineAnnealingLR from initial LR down to `1e-6` over all epochs.
+
+---
+
+## Hyperparameter Sweep
+
+```bash
+# Run all experiments
+python experiments.py
+
+# Run specific preset group
+python experiments.py --only esrgan_lum --epochs 200
+
+# Re-run even if already in leaderboard
+python experiments.py --only swinir_lum --epochs 200 --force
+
+# Show current leaderboard
+python experiments.py --show
+
+# Preview without training
+python experiments.py --dry-run
+```
+
+Experiments are tracked in `checkpoints/experiments/leaderboard.json`. Only the top-K checkpoints (default: 4) are kept on disk — lower-ranked `.pth` files are pruned automatically.
+
+PSNR is measured in RGB for standard experiments and in Y (luminance) for `lum_loss` experiments, since the model optimizes for Y. Both values are logged per epoch.
+
+---
+
+## Dataset Tools
+
+### Sync from ComfyUI output
+```bash
+python sync_dataset.py
+```
+Copies new LR/HR pairs from the ComfyUI output folder to `dataset/train/`.
+
+### Analyze dataset quality
+```bash
+python analyze_dataset.py --top-bad 20 --save-report report.csv --save-plots
+```
+Computes per-pair metrics (SSIM, color drift in LAB, sharpness ratio) and flags problematic pairs. Color drift is the most reliable indicator for SD-generated datasets.
+
+### Filter by color drift
+```bash
+python filter_dataset.py --top-pct 20
+```
+Copies the cleanest 80% of pairs (by color drift) to `dataset/train_clean/`. Does not modify the original dataset.
+
+### Color correction
+```bash
+python color_correct_dataset.py --method combined --strength 0.5
+```
+Corrects HR color drift relative to LR using Reinhard color transfer + histogram matching. Output in `dataset/train_cc/`.
+
+| Method | Effect |
+|--------|--------|
+| `reinhard` | Shifts LAB mean/std — gentle, preserves SD gradients |
+| `histogram` | Forces per-channel histogram match — stronger, may cause banding |
+| `combined` | Reinhard + partial histogram blend (default) |
+| `adaptive` | Like combined but scales with drift severity |
+
+---
+
+## Evaluation
+
+```bash
+python eval_model.py --checkpoint checkpoints/experiments/gemini_lr1e-4_bs16_perc_best.pth --preset gemini
+python eval_model.py --checkpoint path/to/model.pth --save-report eval.csv --save-plots --save-grid
+```
+
+Metrics: PSNR, SSIM, edge score (Sobel cosine similarity), color error (LAB MAE), optional LPIPS (`--lpips`).
+
+Uses the same val split as training (seed=42, 10% holdout) so results are comparable across checkpoints.
+
+---
+
+## GUI
+
+```bash
+python gui_sr.py
+python gui_sr.py --checkpoint checkpoints/gemini/sr_model_best.pth --preset gemini
+```
+
+Three tabs:
+- **LR vs SR** — click an image, drag the slider to compare original and upscaled
+- **Model A vs B** — load two checkpoints, compare side by side with training curves
+- **GIF** — load animated GIFs, preview upscaled animation with FPS control
+
+---
+
+## Dataset Structure
 
 ```
-vibe-depixel/
-├── main.py                 # Entry point and pipeline orchestration
-├── requirements.txt        # Python dependencies
-├── core/
-│   ├── color.py           # YUV conversion and color similarity
-│   ├── graph.py           # Similarity graph and planarization (Phases 1-4)
-│   ├── spline.py          # Cubic B-splines and optimization (Phase 5)
-│   ├── deep_nn.py         # Deep Neural Network upscaling (alternative)
-│   └── render.py          # SVG export
-├── input/                 # Input images
-└── output/                # Generated SVG/PNG files
+dataset/
+├── train/
+│   ├── lr/          # pixel art originals
+│   └── hr/          # SD-upscaled at 4x resolution
+├── train_clean/     # filtered by filter_dataset.py
+├── train_cc/        # color-corrected by color_correct_dataset.py
+└── train_cc_clean/  # color-corrected + filtered (recommended for training)
 ```
 
-## Key Classes
+Filenames must match between `lr/` and `hr/`. Supported formats: png, jpg, bmp, webp.
+Minimum LR size: 64×64 (128×128 for SwinIR). HR must be exactly 4× the LR resolution.
 
-### Kopf-Lischinski Pipeline
+---
 
-#### `SimilarityGraph` (core/graph.py)
-- `_build_initial_graph()`: Creates 8-connected pixel graph
-- `planarize()`: Resolves diagonal crossings (Phase 2)
-- `reshape_cells()`: Vertex splitting for adaptive cells (Phase 3)
-- `extract_visible_contours()`: Extracts boundaries (Phase 4)
+## Requirements
 
-#### `CubicBSpline` (core/spline.py)
-- `evaluate(t)`: Evaluates cubic B-spline at parameter t
-- `_detect_corners()`: Identifies sharp corners to preserve
-- `optimize()`: Energy minimization with corner preservation
-- `to_svg_path()`: Converts to SVG path string
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install pillow numpy scipy scikit-image matplotlib spandrel PyQt6 piq prodigyopt
+```
 
-#### `SplineOptimizer` (core/spline.py)
-- `_chain_segments()`: Connects segments into continuous paths
-- `_simplify_path()`: Ramer-Douglas-Peucker simplification
-- `get_splines()`: Creates optimized B-splines from contours
+---
 
-### Deep Neural Network Pipeline
+## TODO
 
-#### `DeepNNDepixelizer` (core/deep_nn.py)
-- `fit()`: Trains the network on input image coordinates → colors
-- `predict()`: Generates upscaled image at target resolution
-- `predict_train()`: Reconstructs original image
-- `save_model()` / `load_model()`: Model persistence
-- `plot_training_history()`: Visualizes training progress
-
-## Algorithm Parameters
-
-### Kopf-Lischinski Vectorization
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `Y_THRESHOLD` | 48/255 | Luminance similarity threshold |
-| `U_THRESHOLD` | 7/255 | U channel similarity threshold |
-| `V_THRESHOLD` | 6/255 | V channel similarity threshold |
-| `CORNER_ANGLE_THRESHOLD` | 100° | Minimum angle for corner detection |
-| `simplify_tolerance` | 0.1 | RDP simplification tolerance |
-| `optimize_iterations` | 3 | Energy optimization iterations |
-
-### Deep Neural Network Upscaling
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `upscale_factor` | 16 | Output image magnification |
-| `epochs` | 1000 | Training iterations |
-| `batch_size` | 32 | Mini-batch size |
-| `learning_rate` | 0.001 | Adam optimizer learning rate |
-| `dropout_rate` | 0.125 | Dropout regularization rate |
-| `validation_split` | 0.1 | Fraction for validation |
-| `patience` | 50 | Early stopping patience |
-
-## Example Results
-
-### Kopf-Lischinski Vectorization
-
-The algorithm successfully converts pixel art into smooth vector graphics while:
-- Preserving sharp corners and features
-- Removing pixel aliasing artifacts
-- Creating resolution-independent output
-
-### Deep Neural Network Upscaling
-
-The Deep NN approach:
-- Learns the discrete color palette from input
-- Maps 2D coordinates to colors via one-hot encoding
-- Generates upscaled images without blur or interpolation artifacts
-- Can upscale to arbitrary resolutions
-
-## References
-
-- Kopf, J., & Lischinski, D. (2011). **Depixelizing Pixel Art**. ACM SIGGRAPH 2011 Papers.
-  - [Project Page](https://johanneskopf.de/publications/pixelart/)
-  - [Paper PDF](https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Kopf11.pdf)
-
-- Inacio, D. **Depixelizing Pixel Art using Deep Neural Networks**.
-  - [GitHub Notebook](https://github.com/diegoinacio/creative-coding-notebooks/blob/master/ML-and-AI/pixel-art-depixelization-deepNN.ipynb)
-
-## License
-
-This implementation is for educational purposes. The original algorithm is described in the SIGGRAPH 2011 paper by Kopf and Lischinski.
+- [ ] **LR warmup** — ramp LR from near-zero to target over first N epochs before cosine decay. Especially useful for fine-tuning ESRGAN/SwinIR to avoid disrupting pretrained weights on early batches.
+- [ ] Fix SD color drift at the source (ComfyUI): img2img with low denoising strength or ControlNet Tile to preserve original color palette during HR generation.
+- [ ] Evaluate on standardized pixel art benchmark (e.g. PixelPerfect set) for cross-project comparison.
+- [ ] Per-character/batch drift analysis to identify which ComfyUI generation sessions produced the worst pairs.
