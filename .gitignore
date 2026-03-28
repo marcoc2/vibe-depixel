@@ -9,6 +9,7 @@ __pycache__/
 # Project Outputs
 output/
 input/
+input-high/
 
 # Resources
 resources/

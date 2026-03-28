@@ -11,10 +11,27 @@ import argparse
 import shutil
 from pathlib import Path
 
-SRC = Path(r"F:\AppsCrucial\ComfyUI_phoenix3\ComfyUI\output\dataset\upscale")
-DST_LR = Path("dataset/train/lr")
-DST_HR = Path("dataset/train/hr")
+SRC = Path(
+    r"F:\AppsCrucial\ComfyUI_phoenix3\ComfyUI\output\dataset\upscale_high\iori"
+)
+DST_LR = Path("dataset/train_iori/lr")
+DST_HR = Path("dataset/train_iori/hr")
 EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+
+
+def _collect_lr_hr_dirs(src: Path):
+    """Yield (lr_dir, hr_dir) pairs from src.
+    Handles both flat (src/lr + src/hr) and batch subdirs (src/{batch}/lr + src/{batch}/hr).
+    """
+    flat_lr = src / "lr"
+    flat_hr = src / "hr"
+    if flat_lr.exists() and flat_hr.exists():
+        yield flat_lr, flat_hr
+    for sub in sorted(src.iterdir()):
+        if not sub.is_dir() or sub.name in ("lr", "hr"):
+            continue
+        if (sub / "lr").exists() and (sub / "hr").exists():
+            yield sub / "lr", sub / "hr"
 
 
 def sync(dry_run: bool = False):
@@ -25,15 +42,10 @@ def sync(dry_run: bool = False):
     copied = 0
     skipped_no_hr = 0
 
-    for batch_dir in sorted(SRC.iterdir()):
-        if not batch_dir.is_dir():
-            continue
-        lr_dir = batch_dir / "lr"
-        hr_dir = batch_dir / "hr"
-        if not lr_dir.exists() or not hr_dir.exists():
-            continue
-
-        hr_names = set(f.name for f in hr_dir.iterdir() if f.suffix.lower() in EXTENSIONS)
+    for lr_dir, hr_dir in _collect_lr_hr_dirs(SRC):
+        hr_names = set(
+            f.name for f in hr_dir.iterdir() if f.suffix.lower() in EXTENSIONS
+        )
 
         for lr_file in sorted(lr_dir.iterdir()):
             if lr_file.suffix.lower() not in EXTENSIONS:
@@ -45,7 +57,7 @@ def sync(dry_run: bool = False):
                 continue
 
             if dry_run:
-                print(f"  [new] {batch_dir.name}/{lr_file.name}")
+                print(f"  [new] {lr_dir.parent.name}/{lr_file.name}")
             else:
                 shutil.copy2(lr_file, DST_LR / lr_file.name)
                 shutil.copy2(hr_dir / lr_file.name, DST_HR / lr_file.name)
@@ -53,10 +65,14 @@ def sync(dry_run: bool = False):
             copied += 1
 
     total = len(list(DST_LR.iterdir())) if not dry_run else len(existing)
-    print(f"\n{'[DRY RUN] ' if dry_run else ''}+{copied} new pairs  |  {skipped_no_hr} skipped (no HR)  |  {total} total")
+    print(
+        f"\n{'[DRY RUN] ' if dry_run else ''}+{copied} new pairs  |  {skipped_no_hr} skipped (no HR)  |  {total} total"
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sync ComfyUI dataset to local train/")
-    parser.add_argument("--dry-run", action="store_true", help="Preview without copying")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview without copying"
+    )
     sync(parser.parse_args().dry_run)

@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QListWidget, QFileDialog, QLabel, QSplitter,
     QListWidgetItem, QTabWidget, QComboBox, QGroupBox, QSizePolicy,
-    QScrollArea, QProgressBar, QSpinBox,
+    QScrollArea, QProgressBar, QSpinBox, QCheckBox,
 )
 from PyQt6.QtGui import QImage, QPainter, QPixmap
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QTimer
@@ -202,7 +202,6 @@ class ModelSelector(QGroupBox):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self._model: torch.nn.Module | None = None
         self._checkpoint = default_checkpoint
-        self._pretrained = ""
 
         layout = QVBoxLayout(self)
 
@@ -212,7 +211,7 @@ class ModelSelector(QGroupBox):
         self.combo = QComboBox()
         self.combo.addItems(list(PRESETS.keys()) + sorted(SPANDREL_PRESETS))
         self.combo.setCurrentText(default_preset)
-        self.combo.currentTextChanged.connect(self._on_preset)
+        self.combo.currentTextChanged.connect(self.load_model)
         row1.addWidget(self.combo)
         layout.addLayout(row1)
 
@@ -227,33 +226,13 @@ class ModelSelector(QGroupBox):
         row2.addWidget(self.lbl_ckpt)
         layout.addLayout(row2)
 
-        # Pretrained row (ESRGAN only)
-        row3 = QHBoxLayout()
-        self.btn_pre = QPushButton("Pretrained…")
-        self.btn_pre.clicked.connect(self._pick_pre)
-        self.lbl_pre = QLabel("—")
-        self.lbl_pre.setStyleSheet("color:gray;font-size:10px;")
-        self.lbl_pre.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        row3.addWidget(self.btn_pre)
-        row3.addWidget(self.lbl_pre)
-        self.pre_widget = QWidget()
-        self.pre_widget.setLayout(row3)
-        layout.addWidget(self.pre_widget)
-
-        # Load button + status
-        self.btn_load = QPushButton("Load Model")
-        self.btn_load.clicked.connect(self.load_model)
-        layout.addWidget(self.btn_load)
+        # Status
         self.lbl_status = QLabel("Not loaded")
         self.lbl_status.setStyleSheet("color:gray;font-size:10px;")
         layout.addWidget(self.lbl_status)
 
-        self._on_preset(default_preset)
         if default_checkpoint and os.path.exists(default_checkpoint):
             self.load_model()
-
-    def _on_preset(self, preset):
-        self.pre_widget.setVisible(preset in SPANDREL_PRESETS)
 
     def _pick_ckpt(self):
         p, _ = QFileDialog.getOpenFileName(self, "Select checkpoint", "", "Model (*.pth)")
@@ -261,24 +240,49 @@ class ModelSelector(QGroupBox):
             self._checkpoint = p
             self.lbl_ckpt.setText(Path(p).name)
             self._model = None
-            self.lbl_status.setText("Not loaded")
-            self.lbl_status.setStyleSheet("color:gray;font-size:10px;")
-
-    def _pick_pre(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Select pretrained .pth", "", "Model (*.pth)")
-        if p:
-            self._pretrained = p
-            self.lbl_pre.setText(Path(p).name)
+            # Auto-detectar preset pelo conteúdo do arquivo
+            try:
+                raw = torch.load(p, map_location="cpu", weights_only=True)
+                if isinstance(raw, dict) and "preset" in raw:
+                    detected = raw["preset"]
+                else:
+                    detected = sorted(SPANDREL_PRESETS)[0]  # arquivo externo → esrgan
+                self.combo.blockSignals(True)
+                self.combo.setCurrentText(detected)
+                self.combo.blockSignals(False)
+            except Exception:
+                pass
+            self.load_model()
 
     def load_model(self):
         preset = self.combo.currentText()
+
+        if preset in SPANDREL_PRESETS and not (self._checkpoint and os.path.exists(self._checkpoint)):
+            self.lbl_status.setText("Select a .pth file")
+            self.lbl_status.setStyleSheet("color:orange;font-size:10px;")
+            return
+
         self.lbl_status.setText("Loading…")
         QApplication.processEvents()
         try:
-            model = load_model(preset, self.device, pretrained_path=self._pretrained or None)
+            scale = 4
+            state_dict = None
             if self._checkpoint and os.path.exists(self._checkpoint):
-                sd = torch.load(self._checkpoint, map_location=self.device, weights_only=True)
-                model.load_state_dict(sd, strict=(preset not in SPANDREL_PRESETS))
+                if preset in SPANDREL_PRESETS:
+                    # Spandrel carrega tudo via pretrained_path, sem state_dict separado
+                    pass
+                else:
+                    raw = torch.load(self._checkpoint, map_location=self.device, weights_only=True)
+                    if isinstance(raw, dict) and "state_dict" in raw:
+                        scale = raw.get("scale", 4)
+                        state_dict = raw["state_dict"]
+                    else:
+                        state_dict = raw  # legacy plain state_dict
+            model = load_model(preset, self.device,
+                               pretrained_path=self._checkpoint or None,
+                               scale=scale)
+            if state_dict is not None:
+                model.load_state_dict(state_dict, strict=True)
             model.eval()
             self._model = model
             n = sum(p.numel() for p in model.parameters())
@@ -287,6 +291,7 @@ class ModelSelector(QGroupBox):
             metrics_path = Path(self._checkpoint).parent / "metrics.json" if self._checkpoint else None
             self.model_ready.emit(model, str(metrics_path) if metrics_path and metrics_path.exists() else None)
         except Exception as e:
+            import traceback; traceback.print_exc()
             self.lbl_status.setText(f"Error: {e}")
             self.lbl_status.setStyleSheet("color:red;font-size:10px;")
 
@@ -409,14 +414,19 @@ class GifWorker(QThread):
 
     def run(self):
         try:
+            print(f"[GifWorker] opening {self.gif_path}")
             gif = Image.open(self.gif_path)
+            print(f"[GifWorker] format={gif.format} mode={gif.mode} size={gif.size}")
             frames_raw = []
             durations = []
             for frame in ImageSequence.Iterator(gif):
                 frames_raw.append(np.array(frame.convert('RGB')))
                 durations.append(frame.info.get('duration', 100))
 
-            fps = max(1, round(1000 / (sum(durations) / len(durations))))
+            print(f"[GifWorker] {len(frames_raw)} frames, durations sample={durations[:5]}")
+            avg_duration = sum(durations) / len(durations) if durations else 0
+            fps = max(1, round(1000 / avg_duration)) if avg_duration > 0 else 12
+            print(f"[GifWorker] fps={fps}")
 
             nn_frames = []
             sr_frames = []
@@ -425,7 +435,8 @@ class GifWorker(QThread):
 
             for i, arr in enumerate(frames_raw):
                 self.progress.emit(i, total)
-                h, w = arr.shape[:2]
+                if i == 0:
+                    print(f"[GifWorker] frame shape={arr.shape} dtype={arr.dtype}")
                 # Nearest-neighbor upscale
                 nn = np.kron(arr, np.ones((self.scale, self.scale, 1), dtype=np.uint8))
                 nn_frames.append(nn)
@@ -435,10 +446,16 @@ class GifWorker(QThread):
                     out = self.model(t.to(self.device))
                 sr = (out.squeeze(0).clamp(0, 1).cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
                 sr_frames.append(sr)
+                if i == 0:
+                    print(f"[GifWorker] first SR frame shape={sr.shape}")
 
+            print(f"[GifWorker] done, emitting {len(nn_frames)} frames")
             self.progress.emit(total, total)
             self.finished.emit(nn_frames, sr_frames, fps)
         except Exception as e:
+            import traceback
+            print(f"[GifWorker] ERROR: {e}")
+            traceback.print_exc()
             self.error.emit(str(e))
 
 
@@ -464,6 +481,80 @@ class FrameCanvas(QLabel):
         self.setPixmap(px)
 
 
+RIFE_BASE = Path("F:/AppsCrucial/ComfyUI_phoenix3/ComfyUI/custom_nodes/comfyui-frame-interpolation")
+RIFE_CKPT = RIFE_BASE / "ckpts/rife/rife49.pth"
+
+
+def _load_rife(device: torch.device):
+    """Import IFNet from the ComfyUI RIFE node, mocking the comfy dependency."""
+    import types
+    if "comfy" not in sys.modules:
+        comfy_mock = types.ModuleType("comfy")
+        mm_mock = types.ModuleType("comfy.model_management")
+        mm_mock.get_torch_device = lambda: device
+        mm_mock.soft_empty_cache = lambda: torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        sys.modules["comfy"] = comfy_mock
+        sys.modules["comfy.model_management"] = mm_mock
+        comfy_mock.model_management = mm_mock
+
+    rife_dir = str(RIFE_BASE / "vfi_models" / "rife")
+    if rife_dir not in sys.path:
+        sys.path.insert(0, rife_dir)
+
+    from rife_arch import IFNet  # noqa
+    model = IFNet(arch_ver="4.7")
+    state = torch.load(str(RIFE_CKPT), map_location=device, weights_only=False)
+    model.load_state_dict(state)
+    model.eval().to(device)
+    return model
+
+
+class RifeWorker(QThread):
+    """Runs RIFE 2x interpolation on a list of SR frames."""
+    progress = pyqtSignal(int, int)
+    finished = pyqtSignal(list, list)   # sr_interp, nn_sync
+    error = pyqtSignal(str)
+
+    def __init__(self, sr_frames: list, nn_frames: list, device: torch.device):
+        super().__init__()
+        self.sr_frames = sr_frames
+        self.nn_frames = nn_frames
+        self.device = device
+
+    def run(self):
+        try:
+            model = _load_rife(self.device)
+            scale_list = [8.0, 4.0, 2.0, 1.0]
+            n = len(self.sr_frames)
+            sr_out = []
+            nn_out = []
+
+            with torch.inference_mode():
+                for i in range(n - 1):
+                    self.progress.emit(i, n - 1)
+
+                    f0 = torch.from_numpy(self.sr_frames[i]).permute(2, 0, 1).unsqueeze(0).float().div(255).to(self.device)
+                    f1 = torch.from_numpy(self.sr_frames[i + 1]).permute(2, 0, 1).unsqueeze(0).float().div(255).to(self.device)
+                    ts = torch.tensor([[[[0.5]]]], dtype=torch.float32, device=self.device)
+
+                    mid = model(f0, f1, ts, scale_list)
+                    mid_np = (mid.clamp(0, 1).squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+
+                    sr_out.append(self.sr_frames[i])
+                    sr_out.append(mid_np)
+                    nn_out.append(self.nn_frames[i])
+                    nn_out.append(self.nn_frames[i])   # duplicate original for sync
+
+            # append last frame
+            sr_out.append(self.sr_frames[-1])
+            nn_out.append(self.nn_frames[-1])
+
+            self.progress.emit(n - 1, n - 1)
+            self.finished.emit(sr_out, nn_out)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class GifTab(QWidget):
     def __init__(self, device: torch.device):
         super().__init__()
@@ -471,7 +562,10 @@ class GifTab(QWidget):
         self._worker = None
         self._nn_frames: list[np.ndarray] = []
         self._sr_frames: list[np.ndarray] = []
+        self._nn_frames_interp: list[np.ndarray] = []
+        self._sr_frames_interp: list[np.ndarray] = []
         self._frame_idx = 0
+        self._rife_worker = None
         self._timer = QTimer()
         self._timer.timeout.connect(self._next_frame)
 
@@ -495,6 +589,10 @@ class GifTab(QWidget):
         fps_row.addWidget(self.fps_spin)
         fps_row.addStretch()
 
+        self.chk_interpolate = QCheckBox("Interpolate (RIFE)")
+        self.chk_interpolate.setChecked(False)
+        self.chk_interpolate.toggled.connect(self._on_interpolate_toggled)
+
         controls = QWidget()
         cl = QVBoxLayout(controls)
         cl.addWidget(self.selector)
@@ -502,6 +600,7 @@ class GifTab(QWidget):
         cl.addWidget(self.lbl_gif)
         cl.addWidget(self.progress)
         cl.addLayout(fps_row)
+        cl.addWidget(self.chk_interpolate)
         cl.addStretch()
         controls.setFixedWidth(260)
 
@@ -545,18 +644,92 @@ class GifTab(QWidget):
     def _on_done(self, nn_frames: list, sr_frames: list, fps: int):
         self._nn_frames = nn_frames
         self._sr_frames = sr_frames
+        self._nn_frames_interp.clear()
+        self._sr_frames_interp.clear()
+        self._original_fps = fps
         self._frame_idx = 0
         self.fps_spin.setValue(fps)
         self.progress.setVisible(False)
         self.lbl_gif.setText(f"{len(nn_frames)} frames @ {fps} fps")
         self._timer.start(1000 // fps)
+        if self.chk_interpolate.isChecked():
+            self._run_rife()
+
+    def _on_interpolate_toggled(self, checked: bool):
+        if not self._sr_frames:
+            return
+        self._frame_idx = 0
+        if checked:
+            if self._sr_frames_interp:
+                # already cached — just switch to interpolated playback
+                fps = self._original_fps * 2
+                self.fps_spin.blockSignals(True)
+                self.fps_spin.setValue(fps)
+                self.fps_spin.blockSignals(False)
+                self.lbl_gif.setText(f"{len(self._sr_frames_interp)} frames @ {fps} fps (RIFE 2×)")
+                self._timer.start(1000 // fps)
+            else:
+                self._run_rife()
+        else:
+            # restore original playback
+            fps = self._original_fps
+            self.fps_spin.blockSignals(True)
+            self.fps_spin.setValue(fps)
+            self.fps_spin.blockSignals(False)
+            self.lbl_gif.setText(f"{len(self._nn_frames)} frames @ {fps} fps")
+            self._timer.start(1000 // fps)
+
+    def _run_rife(self):
+        self._timer.stop()
+        self.progress.setVisible(True)
+        self.progress.setFormat("RIFE %v/%m")
+        self.lbl_gif.setText("Running RIFE…")
+        self._rife_worker = RifeWorker(self._sr_frames, self._nn_frames, self.device)
+        self._rife_worker.progress.connect(self._on_rife_progress)
+        self._rife_worker.finished.connect(self._on_rife_done)
+        self._rife_worker.error.connect(self._on_rife_error)
+        self._rife_worker.start()
+
+    def _on_rife_progress(self, current: int, total: int):
+        self.progress.setMaximum(total)
+        self.progress.setValue(current)
+
+    def _on_rife_done(self, sr_interp: list, nn_sync: list):
+        self._sr_frames_interp = sr_interp
+        self._nn_frames_interp = nn_sync
+        self._frame_idx = 0
+        self.progress.setVisible(False)
+        if self.chk_interpolate.isChecked():
+            fps = self._original_fps * 2
+            self.fps_spin.blockSignals(True)
+            self.fps_spin.setValue(fps)
+            self.fps_spin.blockSignals(False)
+            self.lbl_gif.setText(f"{len(sr_interp)} frames @ {fps} fps (RIFE 2×)")
+            self._timer.start(1000 // fps)
+        else:
+            # user unchecked while RIFE was running — stay on original
+            self._timer.start(1000 // self._original_fps)
+
+    def _on_rife_error(self, msg: str):
+        self.lbl_gif.setText(f"RIFE error: {msg}")
+        self.progress.setVisible(False)
+        self.chk_interpolate.blockSignals(True)
+        self.chk_interpolate.setChecked(False)
+        self.chk_interpolate.blockSignals(False)
+        self._timer.start(1000 // self._original_fps)
 
     def _next_frame(self):
-        if not self._nn_frames:
+        if self.chk_interpolate.isChecked() and self._sr_frames_interp:
+            nn = self._nn_frames_interp
+            sr = self._sr_frames_interp
+        else:
+            nn = self._nn_frames
+            sr = self._sr_frames
+        if not nn:
             return
-        self.canvas_nn.show_frame(self._nn_frames[self._frame_idx])
-        self.canvas_sr.show_frame(self._sr_frames[self._frame_idx])
-        self._frame_idx = (self._frame_idx + 1) % len(self._nn_frames)
+        self.canvas_nn.show_frame(nn[self._frame_idx])
+        self.canvas_sr.show_frame(sr[self._frame_idx])
+        self._frame_idx = (self._frame_idx + 1) % len(nn)
 
     def _update_fps(self, fps: int):
         if self._timer.isActive():

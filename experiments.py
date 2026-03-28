@@ -22,9 +22,10 @@ from core.sr_plot import plot_metrics, plot_comparison
 
 # ── Experiment grid ───────────────────────────────────────────────────────────
 # Add or remove combinations here freely.
-ESRGAN_PRETRAINED = "4x_PixelPerfectV4_137000_G.pth"
+ESRGAN_PRETRAINED = "1x-Focus.pth"
 # Download from: github.com/JingyunLiang/SwinIR — Releases — real_sr
-SWINIR_PRETRAINED = "4x-PBRify_UpscalerSIR-M_V2.pth"
+SWINIR_PRETRAINED = "003_realSR_BSRGAN_DFOWMFC_s64w8_SwinIR-L_x4_GAN.pth"
+# SWINIR_PRETRAINED = "4x-PBRify_UpscalerSIR-M_V2.pth"
 
 EXPERIMENTS = [
     # default preset
@@ -109,24 +110,6 @@ EXPERIMENTS = [
         "perceptual_type": "freq",
     },
     # esrgan_lum: fine-tuning requer LR baixo (modelo já pré-treinado)
-    {
-        "preset": "esrgan",
-        "lr": 1e-5,
-        "batch_size": 8,
-        "perceptual": True,
-        "lum_loss": True,
-        "perceptual_type": "freq",
-        "pretrained": ESRGAN_PRETRAINED,
-    },
-    {
-        "preset": "esrgan",
-        "lr": 5e-5,
-        "batch_size": 8,
-        "perceptual": True,
-        "lum_loss": True,
-        "perceptual_type": "dists",
-        "pretrained": ESRGAN_PRETRAINED,
-    },
     # esrgan_lum: Prodigy — LR adaptativo
     {
         "preset": "esrgan",
@@ -151,6 +134,17 @@ EXPERIMENTS = [
     # swinir_lum: AdamW + weight_decay (preset defaults: patch=128, clip=0.1, wd=0.01)
     {
         "preset": "swinir",
+        "lr": 1.0,  # ignorado pelo Prodigy, mas mantido pro run_id mostrar "prodigy"
+        "batch_size": 2,
+        "patch_size": 96,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "freq",
+        "use_adamw": "prodigy",
+        "pretrained": SWINIR_PRETRAINED,
+    },
+    {
+        "preset": "swinir",
         "lr": 5e-5,
         "batch_size": 2,
         "perceptual": True,
@@ -170,16 +164,6 @@ EXPERIMENTS = [
     # swinir_lum: Prodigy — LR adaptativo, elimina necessidade de escolher LR
     {
         "preset": "swinir",
-        "lr": 1.0,  # ignorado pelo Prodigy, mas mantido pro run_id mostrar "prodigy"
-        "batch_size": 2,
-        "perceptual": True,
-        "lum_loss": True,
-        "perceptual_type": "freq",
-        "use_adamw": "prodigy",
-        "pretrained": SWINIR_PRETRAINED,
-    },
-    {
-        "preset": "swinir",
         "lr": 1.0,
         "batch_size": 2,
         "perceptual": True,
@@ -187,6 +171,149 @@ EXPERIMENTS = [
         "perceptual_type": "dists",
         "use_adamw": "prodigy",
         "pretrained": SWINIR_PRETRAINED,
+    },
+    # swinir 4x revisited — gan_warmup longo, patch 128, dists
+    {
+        "preset": "swinir",
+        "lr": 1.0,
+        "batch_size": 2,
+        "patch_size": 128,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "dists",
+        "use_adamw": "prodigy",
+        "pretrained": SWINIR_PRETRAINED,
+    },
+    {
+        "preset": "swinir",
+        "lr": 1e-5,
+        "batch_size": 2,
+        "patch_size": 128,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "dists",
+        "pretrained": SWINIR_PRETRAINED,
+    },
+    # enhance — ESRGAN 1x fine-tune (mesma arquitetura que esrgan, pretrained 1x-Focus.pth)
+    {
+        "preset": "enhance",
+        "scale": 1,
+        "lr": 1.0,
+        "batch_size": 8,
+        "patch_size": 256,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "dists",
+        "pretrained": ESRGAN_PRETRAINED,
+        "use_adamw": "prodigy",
+    },
+    {
+        "preset": "enhance",
+        "scale": 1,
+        "lr": 1e-4,
+        "batch_size": 8,
+        "patch_size": 256,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "freq",
+        "pretrained": ESRGAN_PRETRAINED,
+    },
+    {
+        "preset": "enhance",
+        "scale": 1,
+        "lr": 1e-5,
+        "batch_size": 8,
+        "patch_size": 256,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "freq",
+        "pretrained": ESRGAN_PRETRAINED,
+    },
+    {
+        "preset": "enhance",
+        "scale": 1,
+        "lr": 1e-4,
+        "batch_size": 8,
+        "patch_size": 256,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "dists",
+        "pretrained": ESRGAN_PRETRAINED,
+    },
+    # swinir1x — transfer learning parcial: RSTB blocks do SwinIR 4x, head substituído para 1x
+    {
+        "preset": "swinir1x",
+        "scale": 1,
+        "lr": 1.0,
+        "batch_size": 2,
+        "patch_size": 128,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "dists",
+        "pretrained": SWINIR_PRETRAINED,
+        "use_adamw": "prodigy",
+    },
+    {
+        "preset": "swinir1x",
+        "scale": 1,
+        "lr": 1e-4,
+        "batch_size": 2,
+        "patch_size": 128,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "dists",
+        "pretrained": SWINIR_PRETRAINED,
+    },
+    {
+        "preset": "swinir1x",
+        "scale": 1,
+        "lr": 1e-5,
+        "batch_size": 2,
+        "patch_size": 128,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "dists",
+        "pretrained": SWINIR_PRETRAINED,
+    },
+    # swinir1x_chaos — só conv_last treinável, kaiming init, lr agressivo
+    {
+        "preset": "swinir1x",
+        "scale": 1,
+        "lr": 1e-3,
+        "batch_size": 4,
+        "patch_size": 64,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "dists",
+        "pretrained": SWINIR_PRETRAINED,
+        "kaiming_init": True,
+        "gan_weight": 0.1,
+    },
+    # enhance_nopx — perceptual-only (sem L1/pixel), força alucinação de textura via GAN+DISTS
+    {
+        "preset": "enhance",
+        "scale": 1,
+        "lr": 1e-4,
+        "batch_size": 2,
+        "patch_size": 198,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "dists_nopx",
+        "pretrained": ESRGAN_PRETRAINED,
+        "no_pixel_loss": True,
+    },
+    {
+        "preset": "enhance",
+        "scale": 1,
+        "lr": 1.0,
+        "batch_size": 2,
+        "patch_size": 198,
+        "perceptual": True,
+        "lum_loss": True,
+        "perceptual_type": "dists_nopx",
+        "pretrained": ESRGAN_PRETRAINED,
+        "no_pixel_loss": True,
+        "use_adamw": "prodigy",
     },
 ]
 
@@ -274,6 +401,33 @@ def main():
     )
     parser.add_argument("--lr-dir", default=LR_DIR)
     parser.add_argument("--hr-dir", default=HR_DIR)
+    parser.add_argument(
+        "--constant-lr",
+        action="store_true",
+        help="Disable CosineAnnealingLR — keep LR fixed for all experiments in this run",
+    )
+    parser.add_argument(
+        "--gan", action="store_true", help="Enable PatchGAN adversarial training"
+    )
+    parser.add_argument(
+        "--gan-weight",
+        type=float,
+        default=None,
+        help="Adversarial loss weight (default: DEFAULT_GAN_WEIGHT in core/sr_train.py)",
+    )
+    parser.add_argument(
+        "--gan-warmup",
+        type=int,
+        default=0,
+        help="Epochs of supervised-only warmup before GAN activates",
+    )
+    parser.add_argument(
+        "--preview-every",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Save a preview image every N epochs per experiment (0 = disabled)",
+    )
     args = parser.parse_args()
 
     if args.show:
@@ -310,8 +464,12 @@ def main():
             return True
         if args.only == "lum":
             return bool(cfg.get("lum_loss"))
+        if args.only == "nopx":
+            return bool(cfg.get("no_pixel_loss"))
         if args.only.endswith("_lum"):
             return cfg["preset"] == args.only[:-4] and bool(cfg.get("lum_loss"))
+        if args.only.endswith("_nopx"):
+            return cfg["preset"] == args.only[:-5] and bool(cfg.get("no_pixel_loss"))
         return cfg["preset"] == args.only
 
     experiments = [e for e in EXPERIMENTS if _matches(e)]
@@ -358,10 +516,23 @@ def main():
                 preset=cfg["preset"],
                 checkpoint_dir=str(CKPT_BASE / run_id),
                 pretrained_path=cfg.get("pretrained"),
+                scale=cfg.get("scale", 4),
                 patch_size=cfg.get("patch_size"),
                 grad_clip=cfg.get("grad_clip"),
                 weight_decay=cfg.get("weight_decay"),
                 use_adamw=cfg.get("use_adamw"),
+                constant_lr=args.constant_lr,
+                use_gan=args.gan,
+                **(
+                    {"gan_weight": args.gan_weight}
+                    if args.gan_weight is not None
+                    else {}
+                ),
+                gan_warmup=args.gan_warmup,
+                preview_every=args.preview_every,
+                no_pixel_loss=cfg.get("no_pixel_loss", False),
+                kaiming_init=cfg.get("kaiming_init", False),
+                **({"gan_weight": cfg["gan_weight"]} if "gan_weight" in cfg else {}),
             )
         except RuntimeError as e:
             print(f"  [FAILED] {run_id}: {e}")

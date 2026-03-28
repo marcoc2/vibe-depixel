@@ -1,4 +1,5 @@
 import os
+import sys
 import math
 import argparse
 import json
@@ -10,14 +11,22 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from PIL import Image
 
-from core.sr_model import EDSRLite, load_model, ESRGAN_PRESET, get_training_defaults
+from core.sr_model import (
+    EDSRLite,
+    load_model,
+    ESRGAN_PRESET,
+    get_training_defaults,
+    PatchGAN,
+)
 from core.sr_dataset import SRDataset
+
+DEFAULT_GAN_WEIGHT = 0.05  # change here to affect all entry points
 
 
 def psnr(sr: torch.Tensor, hr: torch.Tensor) -> float:
     mse = torch.mean((sr - hr) ** 2).item()
     if mse == 0:
-        return float('inf')
+        return float("inf")
     if mse < 0 or math.isnan(mse) or math.isinf(mse):
         return 0.0
     return 10 * math.log10(1.0 / mse)
@@ -30,6 +39,64 @@ def psnr_y(sr: torch.Tensor, hr: torch.Tensor) -> float:
     return psnr(sr_y, hr_y)
 
 
+def _save_preview(
+    model: nn.Module,
+    sample_lr_t: torch.Tensor,
+    preview_dir: str,
+    epoch: int,
+    device: torch.device,
+) -> None:
+    """Run model on a fixed val sample and save SR + diff previews."""
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+    import torchvision.transforms.functional as TF
+
+    model.eval()
+    with torch.no_grad():
+        sr_t = model(sample_lr_t.unsqueeze(0).to(device)).clamp(0, 1).squeeze(0).cpu()
+
+    sr_arr = (sr_t.permute(1, 2, 0).numpy() * 255).clip(0, 255).astype(np.uint8)
+    sr_img = Image.fromarray(sr_arr)
+
+    # Pixel diff vs previous SR frame
+    prev_path = os.path.join(preview_dir, "preview_sr_prev.png")
+    if os.path.exists(prev_path):
+        prev_arr = np.array(Image.open(prev_path).convert("RGB")).astype(np.int16)
+        diff_arr = (
+            np.abs(sr_arr.astype(np.int16) - prev_arr).clip(0, 255).astype(np.uint8)
+        )
+        # Amplify so small changes are visible
+        diff_arr = np.clip(diff_arr.astype(np.uint16) * 5, 0, 255).astype(np.uint8)
+    else:
+        diff_arr = np.zeros_like(sr_arr)
+    diff_img = Image.fromarray(diff_arr)
+
+    # Save individual frames for MP4 stitching
+    sr_img.save(os.path.join(preview_dir, f"preview_sr_{epoch:04d}.png"))
+    diff_img.save(os.path.join(preview_dir, f"preview_diff_{epoch:04d}.png"))
+
+    # Keep previous SR for next diff
+    sr_img.save(prev_path)
+
+    # Composite SR | diff for live viewer
+    w, h = sr_img.size
+    label_h = 20
+    canvas = Image.new("RGB", (w * 2, h + label_h), (30, 30, 30))
+    canvas.paste(sr_img, (0, label_h))
+    canvas.paste(diff_img, (w, label_h))
+
+    draw = ImageDraw.Draw(canvas)
+    try:
+        font = ImageFont.truetype("arial.ttf", 14)
+    except Exception:
+        font = ImageFont.load_default()
+    draw.text(
+        (4, 2), f"SR  |  diff ×5 — epoch {epoch}", fill=(220, 220, 220), font=font
+    )
+
+    canvas.save(os.path.join(preview_dir, "preview_latest.png"))
+
+
 def train(
     lr_dir: str,
     hr_dir: str,
@@ -40,59 +107,108 @@ def train(
     batch_size: int = 16,
     epochs: int = 200,
     lr: float = 5e-4,
-    checkpoint_dir: str = 'checkpoints',
+    checkpoint_dir: str = "checkpoints",
     use_perceptual: bool = False,
     use_lum_loss: bool = False,
-    perceptual_type: str = 'freq',
-    preset: str = 'default',
+    perceptual_type: str = "freq",
+    preset: str = "default",
     resume: bool = False,
     pretrained_path: str | None = None,
     grad_clip: float | None = None,
     weight_decay: float | None = None,
     use_adamw: bool | None = None,
+    constant_lr: bool = False,
+    use_gan: bool = False,
+    gan_weight: float = DEFAULT_GAN_WEIGHT,
+    gan_warmup: int = 0,
+    preview_every: int = 0,
+    no_pixel_loss: bool = False,
+    kaiming_init: bool = False,
 ):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     # Apply per-preset training defaults for any value not explicitly set
     td = get_training_defaults(preset)
-    if patch_size  is None: patch_size  = td["patch_size"]
-    if grad_clip   is None: grad_clip   = td["grad_clip"]
-    if weight_decay is None: weight_decay = td["weight_decay"]
-    if use_adamw   is None: use_adamw   = td["use_adamw"]
-    print(f"Training: patch={patch_size}  grad_clip={grad_clip}  "
-          f"wd={weight_decay}  optimizer={'AdamW' if use_adamw else 'Adam'}")
+    if patch_size is None:
+        patch_size = td["patch_size"]
+    if grad_clip is None:
+        grad_clip = td["grad_clip"]
+    if weight_decay is None:
+        weight_decay = td["weight_decay"]
+    if use_adamw is None:
+        use_adamw = td["use_adamw"]
+    _opt_name = (
+        "Prodigy" if use_adamw == "prodigy" else ("AdamW" if use_adamw else "Adam")
+    )
+    print(
+        f"Training: patch={patch_size}  grad_clip={grad_clip}  wd={weight_decay}  optimizer={_opt_name}"
+    )
 
     # Datasets
-    full_dataset = SRDataset(lr_dir, hr_dir, patch_size=patch_size, scale=scale, augment=True)
+    full_dataset = SRDataset(
+        lr_dir, hr_dir, patch_size=patch_size, scale=scale, augment=True
+    )
 
     if val_lr_dir and val_hr_dir:
         train_dataset = full_dataset
-        val_dataset = SRDataset(val_lr_dir, val_hr_dir, patch_size=patch_size, scale=scale, augment=False)
+        val_dataset = SRDataset(
+            val_lr_dir, val_hr_dir, patch_size=patch_size, scale=scale, augment=False
+        )
     else:
         n_val = max(1, len(full_dataset) // 10)
         n_train = len(full_dataset) - n_val
         train_dataset, val_dataset = random_split(
-            full_dataset, [n_train, n_val],
-            generator=torch.Generator().manual_seed(42)
+            full_dataset, [n_train, n_val], generator=torch.Generator().manual_seed(42)
         )
         print(f"Split: {n_train} train, {n_val} val")
 
-    num_workers = min(8, os.cpu_count() or 4)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
-                            num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    num_workers = min(4, os.cpu_count() or 2)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True,
+    )
     print(f"DataLoader: {num_workers} workers")
 
     # Model
-    model = load_model(preset, device, pretrained_path=pretrained_path, scale=scale)
+    model = load_model(
+        preset,
+        device,
+        pretrained_path=pretrained_path,
+        scale=scale,
+        kaiming_init=kaiming_init,
+    )
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {n_params:,}")
 
     # Loss
-    if use_lum_loss:
-        criterion = LumSRLoss(device, use_perceptual=use_perceptual, perceptual_type=perceptual_type)
+    if no_pixel_loss:
+        criterion = LumSRLoss(
+            device,
+            use_perceptual=use_perceptual,
+            perceptual_type=perceptual_type,
+            w_y=0.01,
+            w_cbcr=0.001,
+            w_freq=0.0,
+        )
+        percep_label = f"{perceptual_type}" if use_perceptual else "none"
+        print(f"Loss: perceptual-only ({percep_label}) — pixel/L1 disabled")
+    elif use_lum_loss:
+        criterion = LumSRLoss(
+            device, use_perceptual=use_perceptual, perceptual_type=perceptual_type
+        )
         percep_label = f" + {perceptual_type}" if use_perceptual else " + freq"
         print(f"Loss: YCbCr-weighted (Y=1.0, CbCr=0.1){percep_label}")
     else:
@@ -104,57 +220,184 @@ def train(
             from prodigyopt import Prodigy
         except ImportError:
             raise ImportError("Prodigy requires: pip install prodigyopt")
-        optimizer = Prodigy(model.parameters(), weight_decay=weight_decay, safeguard_warmup=True)
+        optimizer = Prodigy(
+            model.parameters(), weight_decay=weight_decay, safeguard_warmup=True
+        )
         # Prodigy adapts LR internally — cosine still works as a shape multiplier
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=0.1)
+        scheduler = (
+            None
+            if constant_lr
+            else torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=epochs, eta_min=0.1
+            )
+        )
         print(f"Optimizer: Prodigy (adaptive LR)  wd={weight_decay}")
     elif use_adamw:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=lr, weight_decay=weight_decay
+        )
+        scheduler = (
+            None
+            if constant_lr
+            else torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=epochs, eta_min=1e-6
+            )
+        )
     else:
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=lr, weight_decay=weight_decay
+        )
+        scheduler = (
+            None
+            if constant_lr
+            else torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=epochs, eta_min=1e-6
+            )
+        )
+
+    # Discriminator
+    discriminator = None
+    opt_d = None
+    mse_loss = nn.MSELoss()
+    if use_gan:
+        discriminator = PatchGAN().to(device)
+        opt_d = torch.optim.Adam(
+            discriminator.parameters(), lr=1e-4, betas=(0.9, 0.999)
+        )
+        print(
+            f"GAN: PatchGAN discriminator  weight={gan_weight}  warmup={gan_warmup} epochs"
+        )
 
     # Checkpoints separated by preset
     preset_dir = os.path.join(checkpoint_dir, preset)
     os.makedirs(preset_dir, exist_ok=True)
     best_psnr = 0.0
     start_epoch = 1
-    metrics = {"loss": [], "psnr": [], "psnr_y": [], "lr": []}
-    metrics_path = os.path.join(preset_dir, 'metrics.json')
+    metrics = {
+        "loss": [],
+        "psnr": [],
+        "psnr_y": [],
+        "lr": [],
+        "d_loss": [],
+        "g_adv": [],
+    }
+    metrics_path = os.path.join(preset_dir, "metrics.json")
 
     # Resume from checkpoint
-    resume_path = os.path.join(preset_dir, 'sr_training_state.pth')
+    resume_path = os.path.join(preset_dir, "sr_training_state.pth")
     if resume and os.path.exists(resume_path):
         state = torch.load(resume_path, map_location=device, weights_only=False)
-        model.load_state_dict(state['model'], strict=False)
-        optimizer.load_state_dict(state['optimizer'])
-        scheduler.load_state_dict(state['scheduler'])
-        start_epoch = state['epoch'] + 1
-        best_psnr = state['best_psnr']
+        model.load_state_dict(state["model"], strict=False)
+        optimizer.load_state_dict(state["optimizer"])
+        if scheduler is not None and "scheduler" in state:
+            scheduler.load_state_dict(state["scheduler"])
+        if use_gan and discriminator is not None and "discriminator" in state:
+            discriminator.load_state_dict(state["discriminator"])
+            opt_d.load_state_dict(state["opt_d"])
+        start_epoch = state["epoch"] + 1
+        best_psnr = state["best_psnr"]
         print(f"Resumed from epoch {state['epoch']} (best PSNR: {best_psnr:.2f} dB)")
         if os.path.exists(metrics_path):
             import json as _json
+
             metrics = _json.loads(Path(metrics_path).read_text())
+
+    # --- Preview setup ---
+    preview_dir = os.path.join(preset_dir, "previews")
+    preview_latest = os.path.join(preview_dir, "preview_latest.png")
+    _viewer_proc = None
+    _preview_sample_lr = None
+    if preview_every > 0:
+        os.makedirs(preview_dir, exist_ok=True)
+        for _f in ("preview_latest.png", "preview_sr_prev.png"):
+            _fp = os.path.join(preview_dir, _f)
+            if os.path.exists(_fp):
+                os.remove(_fp)
+        # Fixed preview input image
+        _preview_input_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "input",
+            "cyclops_00018_.png",
+        )
+        import torchvision.transforms.functional as _TF
+
+        _preview_sample_lr = _TF.to_tensor(
+            Image.open(_preview_input_path).convert("RGB")
+        )
+        viewer_script = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "preview_viewer.py"
+        )
+        run_name = os.path.basename(preset_dir)
+        import subprocess as _subprocess
+
+        _viewer_proc = _subprocess.Popen(
+            [
+                sys.executable,
+                viewer_script,
+                "--watch",
+                preview_latest,
+                "--title",
+                run_name,
+            ],
+            creationflags=getattr(_subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
+        print(f"Preview viewer launched  (every {preview_every} epoch(s))")
+        # Generate initial preview immediately so viewer doesn't show stale image
+        try:
+            _save_preview(
+                model, _preview_sample_lr, preview_dir, start_epoch - 1 or 0, device
+            )
+        except Exception as _e:
+            print(f"  [preview] initial frame skipped: {_e}")
 
     for epoch in range(start_epoch, epochs + 1):
         # Train
         model.train()
+        if discriminator is not None:
+            discriminator.train()
         epoch_loss = 0.0
+        epoch_d_loss = 0.0
+        epoch_g_adv = 0.0
+        gan_active = use_gan and epoch > gan_warmup
         for lr_batch, hr_batch in train_loader:
             lr_batch, hr_batch = lr_batch.to(device), hr_batch.to(device)
             sr = model(lr_batch)
-            loss = criterion(sr, hr_batch)
+
+            # --- Update discriminator ---
+            if gan_active:
+                ones = torch.ones_like(discriminator(hr_batch))
+                zeros = torch.zeros_like(ones)
+                d_real = mse_loss(discriminator(hr_batch), ones)
+                d_fake = mse_loss(discriminator(sr.detach()), zeros)
+                d_loss = 0.5 * (d_real + d_fake)
+                opt_d.zero_grad()
+                d_loss.backward()
+                opt_d.step()
+                epoch_d_loss += d_loss.item()
+
+            # --- Update generator ---
+            g_loss = criterion(sr, hr_batch)
+            if gan_active:
+                ones = torch.ones_like(discriminator(sr))
+                g_adv = mse_loss(discriminator(sr), ones)
+                epoch_g_adv += g_adv.item()
+                g_loss = g_loss + gan_weight * g_adv
             optimizer.zero_grad()
-            loss.backward()
+            g_loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
             optimizer.step()
-            epoch_loss += loss.item()
-        scheduler.step()
+            epoch_loss += g_loss.item()
+
+        if scheduler is not None:
+            scheduler.step()
         avg_loss = epoch_loss / len(train_loader)
+        avg_d_loss = epoch_d_loss / len(train_loader)
+        avg_g_adv = epoch_g_adv / len(train_loader)
 
         if math.isnan(avg_loss) or math.isinf(avg_loss) or avg_loss > 1e6:
-            print(f"  [abort] Loss diverged ({avg_loss:.2f}) at epoch {epoch} — stopping early.")
+            print(
+                f"  [abort] Loss diverged ({avg_loss:.2f}) at epoch {epoch} — stopping early."
+            )
             raise RuntimeError(f"Loss diverged at epoch {epoch}: {avg_loss}")
 
         # Validate
@@ -165,68 +408,161 @@ def train(
             for lr_batch, hr_batch in val_loader:
                 lr_batch, hr_batch = lr_batch.to(device), hr_batch.to(device)
                 sr = model(lr_batch)
-                val_psnr   += psnr(sr, hr_batch)
+                val_psnr += psnr(sr, hr_batch)
                 val_psnr_y += psnr_y(sr, hr_batch)
-        val_psnr   /= len(val_loader)
+        val_psnr /= len(val_loader)
         val_psnr_y /= len(val_loader)
 
-        current_lr = scheduler.get_last_lr()[0]
-        print(f"Epoch {epoch}/{epochs}  loss={avg_loss:.4f}  PSNR={val_psnr:.2f} dB  PSNR-Y={val_psnr_y:.2f} dB  lr={current_lr:.1e}")
+        current_lr = (
+            scheduler.get_last_lr()[0]
+            if scheduler is not None
+            else optimizer.param_groups[0]["lr"]
+        )
+        gan_str = (
+            f"  D={avg_d_loss:.4f}  G_adv={avg_g_adv:.4f}"
+            if gan_active
+            else (f"  [warmup {epoch}/{gan_warmup}]" if use_gan else "")
+        )
+        print(
+            f"Epoch {epoch}/{epochs}  loss={avg_loss:.4f}  PSNR={val_psnr:.2f} dB  PSNR-Y={val_psnr_y:.2f} dB  lr={current_lr:.1e}{gan_str}"
+        )
 
         metrics["loss"].append(round(avg_loss, 6))
         metrics["psnr"].append(round(val_psnr, 4))
         metrics["psnr_y"].append(round(val_psnr_y, 4))
         metrics["lr"].append(current_lr)
+        metrics["d_loss"].append(round(avg_d_loss, 6))
+        metrics["g_adv"].append(round(avg_g_adv, 6))
         Path(metrics_path).write_text(json.dumps(metrics))
+
+        # --- Preview frame ---
+        if (
+            preview_every > 0
+            and _preview_sample_lr is not None
+            and epoch % preview_every == 0
+        ):
+            try:
+                _save_preview(model, _preview_sample_lr, preview_dir, epoch, device)
+            except Exception as _e:
+                print(f"  [preview] skipped: {_e}")
 
         # Checkpointing: lum_loss experiments use PSNR-Y as save criterion
         # (model optimizes Y — RGB PSNR is unfairly penalized by color drift)
         save_metric = val_psnr_y if use_lum_loss else val_psnr
         if save_metric > best_psnr:
             best_psnr = save_metric
-            torch.save(model.state_dict(), os.path.join(preset_dir, 'sr_model_best.pth'))
+            torch.save(
+                {"state_dict": model.state_dict(), "scale": scale, "preset": preset},
+                os.path.join(preset_dir, "sr_model_best.pth"),
+            )
         if epoch % 10 == 0:
-            ckpt_path = os.path.join(preset_dir, f'sr_model_epoch{epoch}.pth')
-            torch.save(model.state_dict(), ckpt_path)
+            ckpt_path = os.path.join(preset_dir, f"sr_model_epoch{epoch}.pth")
+            torch.save(
+                {"state_dict": model.state_dict(), "scale": scale, "preset": preset},
+                ckpt_path,
+            )
             # Keep only last 4 epoch checkpoints
-            epoch_ckpts = sorted(Path(preset_dir).glob('sr_model_epoch*.pth'), key=lambda p: p.stat().st_mtime)
+            epoch_ckpts = sorted(
+                Path(preset_dir).glob("sr_model_epoch*.pth"),
+                key=lambda p: p.stat().st_mtime,
+            )
             for old in epoch_ckpts[:-4]:
                 old.unlink()
 
         # Save training state for resume
-        torch.save({
-            'epoch': epoch,
-            'model': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'scheduler': scheduler.state_dict(),
-            'best_psnr': best_psnr,
-        }, resume_path)
+        torch.save(
+            {
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                **(
+                    {"scheduler": scheduler.state_dict()}
+                    if scheduler is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "discriminator": discriminator.state_dict(),
+                        "opt_d": opt_d.state_dict(),
+                    }
+                    if use_gan and discriminator is not None
+                    else {}
+                ),
+                "best_psnr": best_psnr,
+            },
+            resume_path,
+        )
 
     print(f"\nTraining complete. Best PSNR: {best_psnr:.2f} dB")
     print(f"Best model saved to {os.path.join(preset_dir, 'sr_model_best.pth')}")
-    return best_psnr, os.path.join(preset_dir, 'sr_model_best.pth')
+
+    # --- Generate timelapse MP4s from preview frames ---
+    if preview_every > 0:
+        try:
+            import imageio
+
+            for tag in ("sr", "diff"):
+                frames = sorted(Path(preview_dir).glob(f"preview_{tag}_*.png"))
+                if not frames:
+                    continue
+                mp4_path = os.path.join(preview_dir, f"training_{tag}.mp4")
+                with imageio.get_writer(
+                    mp4_path, fps=6, codec="libx264", quality=7
+                ) as writer:
+                    for f in frames:
+                        writer.append_data(imageio.imread(str(f)))
+                print(f"Timelapse saved to {mp4_path}")
+        except ImportError:
+            print(
+                "  [preview] install imageio + imageio-ffmpeg to generate timelapse MP4"
+            )
+        except Exception as _e:
+            print(f"  [preview] MP4 generation failed: {_e}")
+        if _viewer_proc is not None:
+            _viewer_proc.terminate()
+
+    return best_psnr, os.path.join(preset_dir, "sr_model_best.pth")
 
 
-def infer(image_path: str, checkpoint: str, output_path: str | None = None, scale: int = 4,
-          preset: str = 'default', pretrained_path: str | None = None):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def infer(
+    image_path: str,
+    checkpoint: str,
+    output_path: str | None = None,
+    scale: int = 4,
+    preset: str = "default",
+    pretrained_path: str | None = None,
+):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    from core.sr_model import SPANDREL_PRESETS
-    if preset in SPANDREL_PRESETS:
+    from core.sr_model import SPANDREL_PRESETS, PARTIAL_TRANSFER_PRESETS
+
+    if preset in SPANDREL_PRESETS | PARTIAL_TRANSFER_PRESETS:
         # Spandrel models: load architecture from pretrained, then apply fine-tuned weights if different
         if not pretrained_path:
-            raise ValueError(f"--pretrained is required for --preset {preset} inference")
+            raise ValueError(
+                f"--pretrained is required for --preset {preset} inference"
+            )
         model = load_model(preset, device, pretrained_path=pretrained_path)
         if os.path.abspath(checkpoint) != os.path.abspath(pretrained_path):
             if os.path.exists(checkpoint):
-                model.load_state_dict(torch.load(checkpoint, map_location=device, weights_only=True), strict=False)
+                model.load_state_dict(
+                    torch.load(checkpoint, map_location=device, weights_only=True),
+                    strict=False,
+                )
                 print(f"Applied fine-tuned weights from {checkpoint}")
     else:
+        raw = torch.load(checkpoint, map_location=device, weights_only=True)
+        if isinstance(raw, dict) and "state_dict" in raw:
+            scale = raw.get("scale", scale)
+            preset = raw.get("preset", preset)
+            state_dict = raw["state_dict"]
+        else:
+            state_dict = raw  # legacy plain state_dict, keep scale/preset as passed
         model = EDSRLite.from_preset(preset, scale=scale).to(device)
-        model.load_state_dict(torch.load(checkpoint, map_location=device, weights_only=True))
+        model.load_state_dict(state_dict)
     model.eval()
 
-    img = Image.open(image_path).convert('RGB')
+    img = Image.open(image_path).convert("RGB")
     lr = torch.from_numpy(np.array(img)).permute(2, 0, 1).unsqueeze(0).float() / 255.0
     lr = lr.to(device)
 
@@ -256,13 +592,16 @@ class _GradientLoss(nn.Module):
         sr_dy = sr[:, :, 1:, :] - sr[:, :, :-1, :]
         hr_dx = hr[:, :, :, 1:] - hr[:, :, :, :-1]
         hr_dy = hr[:, :, 1:, :] - hr[:, :, :-1, :]
-        return torch.mean(torch.abs(sr_dx - hr_dx)) + torch.mean(torch.abs(sr_dy - hr_dy))
+        return torch.mean(torch.abs(sr_dx - hr_dx)) + torch.mean(
+            torch.abs(sr_dy - hr_dy)
+        )
 
 
 class _VGGPerceptualLoss(nn.Module):
     def __init__(self, device: torch.device):
         super().__init__()
         from torchvision.models import vgg19, VGG19_Weights
+
         vgg = vgg19(weights=VGG19_Weights.DEFAULT).features[:36].eval().to(device)
         for p in vgg.parameters():
             p.requires_grad = False
@@ -276,8 +615,14 @@ class _VGGPerceptualLoss(nn.Module):
 class SRLoss(nn.Module):
     """Combined loss: L1 + gradient + optional perceptual (VGG19)."""
 
-    def __init__(self, device: torch.device, use_perceptual: bool = True,
-                 w_l1: float = 1.0, w_grad: float = 0.5, w_percep: float = 0.1):
+    def __init__(
+        self,
+        device: torch.device,
+        use_perceptual: bool = True,
+        w_l1: float = 1.0,
+        w_grad: float = 0.5,
+        w_percep: float = 0.1,
+    ):
         super().__init__()
         self.l1 = nn.L1Loss()
         self.grad = _GradientLoss()
@@ -296,9 +641,9 @@ class SRLoss(nn.Module):
 def _rgb_to_ycbcr(x: torch.Tensor) -> torch.Tensor:
     """Convert (B, 3, H, W) RGB [0,1] to YCbCr. BT.601 coefficients."""
     r, g, b = x[:, 0:1], x[:, 1:2], x[:, 2:3]
-    y  =  0.299  * r + 0.587  * g + 0.114  * b
-    cb = -0.16874 * r - 0.33126 * g + 0.5    * b + 0.5
-    cr =  0.5     * r - 0.41869 * g - 0.08131 * b + 0.5
+    y = 0.299 * r + 0.587 * g + 0.114 * b
+    cb = -0.16874 * r - 0.33126 * g + 0.5 * b + 0.5
+    cr = 0.5 * r - 0.41869 * g - 0.08131 * b + 0.5
     return torch.cat([y, cb, cr], dim=1)
 
 
@@ -331,6 +676,7 @@ class _DISTSLoss(nn.Module):
         super().__init__()
         try:
             from piq import DISTS
+
             self.dists = DISTS().to(device)
             self.dists.eval()
             for p in self.dists.parameters():
@@ -352,37 +698,47 @@ class LumSRLoss(nn.Module):
       'none'  — no perceptual term
     """
 
-    def __init__(self, device: torch.device, use_perceptual: bool = True,
-                 perceptual_type: str = "freq",
-                 w_y: float = 1.0, w_cbcr: float = 0.1,
-                 w_freq: float = 0.05, w_percep: float = 0.1):
+    def __init__(
+        self,
+        device: torch.device,
+        use_perceptual: bool = True,
+        perceptual_type: str = "freq",
+        w_y: float = 1.0,
+        w_cbcr: float = 0.1,
+        w_freq: float = 0.05,
+        w_percep: float = 0.1,
+    ):
         super().__init__()
-        self.l1   = nn.L1Loss()
+        self.l1 = nn.L1Loss()
         self.grad = _GradientLoss()
         self.freq = _FrequencyLoss()
-        self.w_y      = w_y
-        self.w_cbcr   = w_cbcr
-        self.w_freq   = w_freq
+        self.w_y = w_y
+        self.w_cbcr = w_cbcr
+        self.w_freq = w_freq
         self.w_percep = w_percep
 
         self.percep = None
-        self.percep_type = perceptual_type if use_perceptual else "none"
+        # dists_nopx is an alias for dists used to distinguish no_pixel_loss runs in run_id
+        _percep_type = "dists" if perceptual_type == "dists_nopx" else perceptual_type
+        self.percep_type = _percep_type if use_perceptual else "none"
         if use_perceptual:
-            if perceptual_type == "vgg":
+            if _percep_type == "vgg":
                 self.percep = _VGGPerceptualLoss(device)
-            elif perceptual_type == "dists":
+            elif _percep_type == "dists":
                 self.percep = _DISTSLoss(device)
-            elif perceptual_type == "freq":
+            elif _percep_type == "freq":
                 self.percep = None  # freq is always applied separately below
-            elif perceptual_type != "none":
-                raise ValueError(f"Unknown perceptual_type '{perceptual_type}'. "
-                                 "Choose: vgg, dists, freq, none")
+            elif _percep_type != "none":
+                raise ValueError(
+                    f"Unknown perceptual_type '{_percep_type}'. "
+                    "Choose: vgg, dists, freq, none"
+                )
 
     def forward(self, sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
         sr_yuv = _rgb_to_ycbcr(sr)
         hr_yuv = _rgb_to_ycbcr(hr)
-        sr_y, hr_y       = sr_yuv[:, 0:1], hr_yuv[:, 0:1]
-        sr_cbcr, hr_cbcr = sr_yuv[:, 1:],  hr_yuv[:, 1:]
+        sr_y, hr_y = sr_yuv[:, 0:1], hr_yuv[:, 0:1]
+        sr_cbcr, hr_cbcr = sr_yuv[:, 1:], hr_yuv[:, 1:]
 
         # Luminance: L1 + spatial gradient
         loss = self.w_y * (self.l1(sr_y, hr_y) + 0.5 * self.grad(sr_y, hr_y))
